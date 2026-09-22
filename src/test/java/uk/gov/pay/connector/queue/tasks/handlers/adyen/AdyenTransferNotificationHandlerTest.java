@@ -4,11 +4,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Captor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import uk.gov.pay.connector.events.model.payout.PayoutEvent;
+import uk.gov.pay.connector.gateway.adyen.response.transfer.TransferEventStatus;
 import uk.gov.pay.connector.gateway.adyen.webhook.AdyenWebhookDeserialiser;
 import uk.gov.pay.connector.gatewayaccount.model.GatewayAccountEntity;
 import uk.gov.pay.connector.gatewayaccountcredentials.service.GatewayAccountCredentialsService;
@@ -23,6 +26,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static uk.gov.pay.connector.gateway.PaymentGatewayName.ADYEN;
+import static uk.gov.pay.connector.gateway.adyen.response.transfer.TransferEventStatus.RECEIVED;
 import static uk.gov.pay.connector.gatewayaccount.model.GatewayAccountEntityFixture.aGatewayAccountEntity;
 import static uk.gov.pay.connector.util.TestTemplateResourceLoader.ADYEN_TRANSFER_NOTIFICATION;
 import static uk.gov.pay.connector.util.TestTemplateResourceLoader.load;
@@ -41,14 +45,12 @@ class AdyenTransferNotificationHandlerTest {
     @Mock
     private GatewayAccountCredentialsService gatewayAccountCredentialsService;
 
-    private AdyenWebhookDeserialiser adyenWebhookDeserialiser;
-
     @Mock
     private AdyenTransferNotificationHandler handler;
 
     @BeforeEach
     void setUp() {
-        adyenWebhookDeserialiser = new AdyenWebhookDeserialiser(new JsonObjectMapper(new ObjectMapper()));
+        AdyenWebhookDeserialiser adyenWebhookDeserialiser = new AdyenWebhookDeserialiser(new JsonObjectMapper(new ObjectMapper()));
         handler = new AdyenTransferNotificationHandler(payoutEmitterService, adyenWebhookDeserialiser, gatewayAccountCredentialsService);
     }
 
@@ -60,7 +62,10 @@ class AdyenTransferNotificationHandlerTest {
                 .withGatewayName(ADYEN.getName())
                 .build();
 
-        var payload = load(ADYEN_TRANSFER_NOTIFICATION).replace("{{type}}", "balancePlatform.transfer.created").replace("22222222222", id);
+        var payload = load(ADYEN_TRANSFER_NOTIFICATION)
+                .replace("{{type}}", "balancePlatform.transfer.created")
+                .replace("{{status}}", RECEIVED.getValue())
+                .replace("22222222222", id);
 
         when(gatewayAccountCredentialsService.findGatewayAccountForCredentialKeyAndValue("balance_account_id", id))
                 .thenReturn(gatewayAccountEntity);
@@ -75,7 +80,10 @@ class AdyenTransferNotificationHandlerTest {
 
     @Test
     void shouldThrowErrorWhenAdyenBalanceAccountDataIsMissing(){
-        var payload = load(ADYEN_TRANSFER_NOTIFICATION).replace("\"balanceAccount\": {\n" + "      \"id\": \"22222222222\"\n" + "    },", "");
+        var payload = load(ADYEN_TRANSFER_NOTIFICATION).replace("""
+                "balanceAccount": {
+                      "id": "22222222222"
+                    },""", "");
 
         var exception = assertThrows(RuntimeException.class,
                 () -> handler.process(payload));
@@ -100,5 +108,52 @@ class AdyenTransferNotificationHandlerTest {
         handler.process(payload);
 
         verifyNoInteractions(payoutEmitterService);
+    }
+
+    @ParameterizedTest
+    @EnumSource(value = TransferEventStatus.class, names = {"AUTHORISED", "BOOKED"})
+    void processAdyenTransferUpdatedNotification(TransferEventStatus status) {
+        String id = "balanceAccountId";
+
+        GatewayAccountEntity gatewayAccountEntity = aGatewayAccountEntity()
+                .withGatewayName(ADYEN.getName())
+                .build();
+
+        var payload = load(ADYEN_TRANSFER_NOTIFICATION)
+                .replace("{{type}}", "balancePlatform.transfer.updated")
+                .replace("{{status}}", status.getValue())
+                .replace("22222222222", id);
+
+        when(gatewayAccountCredentialsService.findGatewayAccountForCredentialKeyAndValue("balance_account_id", id))
+                .thenReturn(gatewayAccountEntity);
+
+        handler.process(payload);
+
+        verify(payoutEmitterService).emitPayoutEvent(eventArgumentCaptor.capture(), accountId.capture());
+
+        PayoutEvent event = eventArgumentCaptor.getAllValues().getFirst();
+        assertTrue(event.getEventType().equals("PAYOUT_UPDATED"));
+    }
+
+    @Test
+    void shouldThrowErrorWhenAdyenTransferUpdatedNotificationStatusIsMissing() {
+        String id = "balanceAccountId";
+
+        GatewayAccountEntity gatewayAccountEntity = aGatewayAccountEntity()
+                .withGatewayName(ADYEN.getName())
+                .build();
+
+        var payload = load(ADYEN_TRANSFER_NOTIFICATION)
+                .replace("{{type}}", "balancePlatform.transfer.updated")
+                .replace("status : {{status}}", "")
+                .replace("22222222222", id);
+
+        when(gatewayAccountCredentialsService.findGatewayAccountForCredentialKeyAndValue("balance_account_id", id))
+                .thenReturn(gatewayAccountEntity);
+
+        var exception = assertThrows(RuntimeException.class,
+                () -> handler.process(payload));
+
+        assertThat(exception.getMessage(), is("Could not determine status of transfer notification 333333 as status is missing"));
     }
 }

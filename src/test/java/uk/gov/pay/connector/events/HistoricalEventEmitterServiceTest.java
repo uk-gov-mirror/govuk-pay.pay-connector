@@ -1,7 +1,9 @@
 package uk.gov.pay.connector.events;
 
 import org.hamcrest.core.Is;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -9,6 +11,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import uk.gov.pay.connector.app.ConnectorConfiguration;
 import uk.gov.pay.connector.charge.dao.ChargeDao;
@@ -81,6 +84,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.isNotNull;
 import static org.mockito.Mockito.atMostOnce;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -625,30 +629,6 @@ class HistoricalEventEmitterServiceTest {
     }
 
     @Test
-    void executeShouldOfferRefundEventsWithRefundHistory() {
-        RefundHistory refundHistory = RefundHistoryEntityFixture
-                .aValidRefundHistoryEntity()
-                .withChargeExternalId(chargeEntity.getExternalId())
-                .withStatus(RefundStatus.CREATED.toString())
-                .build();
-
-        chargeEntity.getEvents().clear();
-        when(refundDao.searchAllHistoryByChargeExternalId(chargeEntity.getExternalId())).thenReturn(List.of(refundHistory));
-        when(chargeDao.findMaxId()).thenReturn(1L);
-        when(chargeDao.findById(1L)).thenReturn(Optional.of(chargeEntity));
-        when(chargeService.findCharge(chargeEntity.getExternalId())).thenReturn(Optional.of(Charge.from(chargeEntity)));
-
-        historicalEventEmitterService.emitHistoricEventsById(1L, OptionalLong.empty(), 1L);
-
-        ArgumentCaptor<StateTransition> argument = ArgumentCaptor.forClass(StateTransition.class);
-        verify(stateTransitionService).offerStateTransition(argument.capture(), any(RefundCreatedByService.class), isNotNull());
-
-        assertThat(argument.getAllValues().getFirst().getStateTransitionEventClass(), is(RefundCreatedByService.class));
-
-        verify(emittedEventDao, atMostOnce()).recordEmission(any(), isNotNull());
-    }
-
-    @Test
     void shouldEmitPaymentDetailsEnteredOnlyOnce_IfChargeEventsContainsBothAuth3DSRequiredAndAuthSuccessEvents() {
         ChargeEventEntity firstEvent = ChargeEventEntityFixture.aValidChargeEventEntity()
                 .withTimestamp(ZonedDateTime.now())
@@ -715,56 +695,11 @@ class HistoricalEventEmitterServiceTest {
     }
 
     @Test
-    void executeForDateRange_ShouldEmitAllRefundsEventsOfAChargeWithRefundEventWithinDateRange() {
-        ZonedDateTime eventDate = ZonedDateTime.parse("2016-01-01T00:00:00Z");
-
-        RefundHistory refundHistory = getRefundHistoryEntity(chargeEntity, RefundStatus.CREATED);
-        RefundHistory refundHistory2 = getRefundHistoryEntity(chargeEntity, RefundStatus.REFUNDED);
-
-        chargeEntity.getEvents().clear();
-        when(chargeService.findCharge(chargeEntity.getExternalId())).thenReturn(Optional.of(Charge.from(chargeEntity)));
-        when(refundDao.getRefundHistoryByDateRange(eventDate, eventDate, 1, 100)).thenReturn(List.of(refundHistory));
-        when(refundDao.searchAllHistoryByChargeExternalId(chargeEntity.getExternalId())).thenReturn(List.of(refundHistory, refundHistory2));
-
-        historicalEventEmitterService.emitHistoricEventsByDate(eventDate, eventDate, 1L);
-
-        ArgumentCaptor<StateTransition> argument = ArgumentCaptor.forClass(StateTransition.class);
-        verify(stateTransitionService, times(2)).offerStateTransition(argument.capture(), any(), isNotNull());
-
-        assertThat(argument.getAllValues().getFirst().getStateTransitionEventClass(), is(RefundCreatedByService.class));
-        assertThat(argument.getAllValues().get(1).getStateTransitionEventClass(), is(RefundSucceeded.class));
-    }
-
-    @Test
     void emitHistoricEventsById_shouldNotProcessIfRecordDoesNotExist() {
         historicalEventEmitterService.emitHistoricEventsById(1L, OptionalLong.empty(), 1L);
 
         verifyNoInteractions(emittedEventDao);
         verify(refundDao, never()).searchAllHistoryByChargeExternalId(any());
-    }
-
-    @Test
-    void executeForRefundsOnly_shouldEmitRefundEvents() {
-        RefundHistory refundHistory = getRefundHistoryEntity(chargeEntity, RefundStatus.CREATED);
-        RefundHistory refundHistory2 = getRefundHistoryEntity(chargeEntity, RefundStatus.REFUNDED);
-        RefundEntity refundEntity = RefundEntityFixture.aValidRefundEntity().withId(1L).
-                withChargeExternalId(chargeEntity.getExternalId()).build();
-
-        when(chargeService.findCharge(chargeEntity.getExternalId())).thenReturn(Optional.of(Charge.from(chargeEntity)));
-        when(refundDao.findById(1L)).thenReturn(Optional.of(refundEntity));
-        when(emittedEventDao.hasBeenEmittedBefore(any())).thenReturn(false);
-
-        when(refundDao.searchAllHistoryByChargeExternalId(chargeEntity.getExternalId())).thenReturn(List.of(refundHistory, refundHistory2));
-
-        historicalEventEmitterService.emitRefundEventsOnlyById(1L, OptionalLong.of(1L), 1L);
-
-        ArgumentCaptor<StateTransition> argument = ArgumentCaptor.forClass(StateTransition.class);
-        verify(stateTransitionService, times(2)).offerStateTransition(argument.capture(), any(), isNotNull());
-
-        assertThat(argument.getAllValues().getFirst().getStateTransitionEventClass(), is(RefundCreatedByService.class));
-        assertThat(argument.getAllValues().get(1).getStateTransitionEventClass(), is(RefundSucceeded.class));
-
-        verify(emittedEventDao, atMostOnce()).recordEmission(any(Event.class), isNotNull());
     }
 
     @Test
@@ -982,7 +917,104 @@ class HistoricalEventEmitterServiceTest {
 
         verifyNoInteractions(mockCardDetailsObtained);
     }
-    
+
+    @Nested
+    class executeShouldOfferRefundEvent {
+
+        private MockedStatic<Charge> staticCharge;
+        private Charge charge;
+        private final String id = "12345";
+
+
+        @BeforeEach
+        void setUp() {
+            charge = mock(Charge.class);
+            staticCharge = mockStatic(Charge.class);
+
+            staticCharge.when(() -> Charge.from(chargeEntity)).thenReturn(charge);
+            when(chargeService.findChargeByExternalId(any())).thenReturn(chargeEntity);
+        }
+
+        @AfterEach
+        void tearDown() {
+            if (staticCharge != null) {
+                staticCharge.close();
+            }
+        }
+
+        @Test
+        void executeShouldOfferRefundEventsWithRefundHistory() {
+            RefundHistory refundHistory = RefundHistoryEntityFixture
+                    .aValidRefundHistoryEntity()
+                    .withChargeExternalId(chargeEntity.getExternalId())
+                    .withStatus(RefundStatus.CREATED.toString())
+                    .build();
+
+            chargeEntity.getEvents().clear();
+            when(refundDao.searchAllHistoryByChargeExternalId(chargeEntity.getExternalId())).thenReturn(List.of(refundHistory));
+            when(chargeDao.findMaxId()).thenReturn(1L);
+            when(chargeDao.findById(1L)).thenReturn(Optional.of(chargeEntity));
+
+            historicalEventEmitterService.emitHistoricEventsById(1L, OptionalLong.empty(), 1L);
+
+            ArgumentCaptor<StateTransition> argument = ArgumentCaptor.forClass(StateTransition.class);
+            verify(stateTransitionService).offerStateTransition(argument.capture(), any(RefundCreatedByService.class), isNotNull());
+
+            assertThat(argument.getAllValues().getFirst().getStateTransitionEventClass(), is(RefundCreatedByService.class));
+
+            verify(emittedEventDao, atMostOnce()).recordEmission(any(), isNotNull());
+        }
+
+        @Test
+        void executeForDateRange_ShouldEmitAllRefundsEventsOfAChargeWithRefundEventWithinDateRange() {
+            ZonedDateTime eventDate = ZonedDateTime.parse("2016-01-01T00:00:00Z");
+
+            RefundHistory refundHistory = getRefundHistoryEntity(chargeEntity, RefundStatus.CREATED);
+            RefundHistory refundHistory2 = getRefundHistoryEntity(chargeEntity, RefundStatus.REFUNDED);
+            List<RefundHistory> list = List.of(refundHistory, refundHistory2);
+
+            chargeEntity.getEvents().clear();
+            when(chargeService.findCharge(chargeEntity.getExternalId())).thenReturn(Optional.ofNullable(charge));
+            when(refundDao.getRefundHistoryByDateRange(eventDate, eventDate, 1, 100)).thenReturn(List.of(refundHistory));
+            when(refundDao.searchAllHistoryByChargeExternalId(any())).thenReturn(list);
+
+            historicalEventEmitterService.emitHistoricEventsByDate(eventDate, eventDate, 1L);
+
+            ArgumentCaptor<StateTransition> argument = ArgumentCaptor.forClass(StateTransition.class);
+            verify(stateTransitionService, times(2)).offerStateTransition(argument.capture(), any(), isNotNull());
+
+            assertThat(argument.getAllValues().getFirst().getStateTransitionEventClass(), is(RefundCreatedByService.class));
+            assertThat(argument.getAllValues().get(1).getStateTransitionEventClass(), is(RefundSucceeded.class));
+        }
+
+        @Test
+        void executeForRefundsOnly_shouldEmitRefundEvents() {
+            RefundHistory refundHistory = getRefundHistoryEntity(chargeEntity, RefundStatus.CREATED);
+            RefundHistory refundHistory2 = getRefundHistoryEntity(chargeEntity, RefundStatus.REFUNDED);
+            RefundEntity refundEntity = RefundEntityFixture.aValidRefundEntity().withId(1L).
+                    withChargeExternalId(chargeEntity.getExternalId()).build();
+
+            List<RefundHistory> list = List.of(refundHistory, refundHistory2);
+
+            when(refundDao.findById(1L)).thenReturn(Optional.of(refundEntity));
+            when(emittedEventDao.hasBeenEmittedBefore(any())).thenReturn(false);
+            when(refundDao.searchAllHistoryByChargeExternalId(any())).thenReturn(list);
+
+            when(refundDao.searchAllHistoryByChargeExternalId(chargeEntity.getExternalId())).thenReturn(List.of(refundHistory, refundHistory2));
+
+            historicalEventEmitterService.emitRefundEventsOnlyById(1L, OptionalLong.of(1L), 1L);
+
+            ArgumentCaptor<StateTransition> argument = ArgumentCaptor.forClass(StateTransition.class);
+            verify(stateTransitionService, times(2)).offerStateTransition(argument.capture(), any(), isNotNull());
+
+            assertThat(argument.getAllValues().getFirst().getStateTransitionEventClass(), is(RefundCreatedByService.class));
+            assertThat(argument.getAllValues().get(1).getStateTransitionEventClass(), is(RefundSucceeded.class));
+
+            verify(emittedEventDao, atMostOnce()).recordEmission(any(Event.class), isNotNull());
+        }
+    }
+
+
     private ChargeEventEntity setupChargeEvent(ChargeStatus chargeStatus) {
         return ChargeEventEntityFixture.aValidChargeEventEntity()
                 .withTimestamp(ZonedDateTime.now().plusMinutes(2))
